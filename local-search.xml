@@ -4,6 +4,56 @@
   
   
   <entry>
+    <title>apollo更新配置失效</title>
+    <link href="/2023/06/01/apollo%E6%9B%B4%E6%96%B0%E9%85%8D%E7%BD%AE%E5%A4%B1%E6%95%88/"/>
+    <url>/2023/06/01/apollo%E6%9B%B4%E6%96%B0%E9%85%8D%E7%BD%AE%E5%A4%B1%E6%95%88/</url>
+    
+    <content type="html"><![CDATA[<h2 id="背景"><a href="#背景" class="headerlink" title="背景"></a>背景</h2><p>测试发现apollo更新配置，页面上没有变化（能保持原来的配置，但是不会更新）</p><h2 id="问题排查"><a href="#问题排查" class="headerlink" title="问题排查"></a>问题排查</h2><p  class="note note-info">这里假设该配置的key为myName，读取方式为 @Value("#{'${myname}'.split(',')}")。</p><p>起初排查的方向是我这个apollo配置中加入的SpEl表达式处理了下格式，导致的无法更新数据。但是有个疑问是项目启动的时候能读取到最新的数据，那说明我写的@Value格式没啥问题，遂放弃这个方向。</p><p>接着我想看下是否监听到了配置变化，先修改了另一个apollo配置，假设为age，看是否能读取出来，结果是当然的，成功的读取除了数据，然后我再次试了myName，还是无法读取出来。</p><p>这时，我发现控制台两次打出了不一样的日志，第一次监听到了apollo配置的变化，并打印出了新值和对应的key——age，而第二次什么也没有打印出来。</p><p>然后准备打断点看是不是真没监听到apollo的变化，进入AutoUpdateConfigChangeListener中onChange方法，方法第一行打了个断点，发现确实是可以进断点，说明是监听到了apollo的变化的。</p><p>跟着断点走，到springValueRegistry.get(beanFactory, key)，发现没有获取到值，也就不执行到后面的代码了。为什么没有获取到值呢，我用age也走了一遍断点，这个地方是能获取到值的。</p><p>然后进了SpringValueRegistry的get方法，关键代码来了：beanFactorySpringValues.get(key)。就是这行代码没有获取到，这个beanFactorySpringValues是个map类型的，点进去看，key里面有我们想要的那个key。经过仔细对比后，发现了问题，beanFactorySpringValues中的key是myname，是全部小写的，然而在apollo中是myName，这在map中肯定获取不到啊。</p><p>到这里，问题就很清晰了，不过衍生出一个新问题，为什么启动的时候能获取到正确的值，这是因为在apollo配置中，key是大小写不敏感的，就是说已经有一个key为a的配置，想要加一个A的配置会提示已存在。在项目启动时，会去从apollo中读取配置，因为apollo大小写不敏感，也能读取到正确的配置。但是在变更的时候，监听到的key值该是大写就是大写，小写就是小写，在map中获取的时候就无法获取到正确的值。</p><h2 id="总结"><a href="#总结" class="headerlink" title="总结"></a>总结</h2><p>归根究底，这是个很小的问题，只要做好最基础的大小写就没有这个问题。不过具有一定的迷惑性，也引导我看了一部分apollo的源码，遂记之。</p>]]></content>
+    
+    
+    <categories>
+      
+      <category>work</category>
+      
+    </categories>
+    
+    
+    <tags>
+      
+      <tag>bug</tag>
+      
+    </tags>
+    
+  </entry>
+  
+  
+  
+  <entry>
+    <title>循环依赖引发的系统超时</title>
+    <link href="/2023/01/20/%E5%BE%AA%E7%8E%AF%E4%BE%9D%E8%B5%96%E5%BC%95%E5%8F%91%E7%9A%84%E7%B3%BB%E7%BB%9F%E8%B6%85%E6%97%B6/"/>
+    <url>/2023/01/20/%E5%BE%AA%E7%8E%AF%E4%BE%9D%E8%B5%96%E5%BC%95%E5%8F%91%E7%9A%84%E7%B3%BB%E7%BB%9F%E8%B6%85%E6%97%B6/</url>
+    
+    <content type="html"><![CDATA[<h2 id="背景"><a href="#背景" class="headerlink" title="背景"></a>背景</h2><p>线上告警，下游服务调用我们服务超时</p><h2 id="需求"><a href="#需求" class="headerlink" title="需求"></a>需求</h2><p>卖家一定时间内未发货，系统自动取消订单并且调用下游服务进行退款</p><h2 id="原因"><a href="#原因" class="headerlink" title="原因"></a>原因</h2><p>判定用户是否超时未发货是通过定时任务加zset完成的，处理超时未发货的整个方法逻辑都用了分布式锁和本地事务。在该方法中，先更新了本地数据库的订单状态，接着调用下游服务进行支付取消退款操作。</p><p>这个退款操作首先调用了服务a，服务a又调用了服务b，服务b又会调到我们的自有服务，这样服务之间的一个循环调用关系就产生了。</p><p>前面说到处理超时未发货的整个逻辑都用了分布式锁和本地事务，提供给服务b的接口是个公用的接口，并且整个方法用了本地事务，会根据订单状态执行不同的逻辑，条件分支较多。退款逻辑会将该订单的信息从zset中移除，这个移除逻辑用了分布式锁和本地事务，并且key和发起操作的key是一样的，而发起操作时的锁还没有释放，造成了锁等待引发了服务超时。</p><h2 id="解决方案"><a href="#解决方案" class="headerlink" title="解决方案"></a>解决方案</h2><p>现有解决方案是将发起退款操作时调用下游接口的逻辑放到分布式锁外，减少分布式锁的控制范围，防止出现锁等待。其实解决方案还有很多，比如说用MQ或者异步线程，核心思想就是减少锁等待。</p><h2 id="收获"><a href="#收获" class="headerlink" title="收获"></a>收获</h2><p>多梳理业务流程以及依赖关系尽量去避免这样的循环依赖关系，另外也可以通过全链路去发现。</p>]]></content>
+    
+    
+    <categories>
+      
+      <category>work</category>
+      
+    </categories>
+    
+    
+    <tags>
+      
+      <tag>bug</tag>
+      
+    </tags>
+    
+  </entry>
+  
+  
+  
+  <entry>
     <title>2023 Flag</title>
     <link href="/2023/01/12/2023-Flag/"/>
     <url>/2023/01/12/2023-Flag/</url>
@@ -23,19 +73,6 @@
       <tag>flag</tag>
       
     </tags>
-    
-  </entry>
-  
-  
-  
-  <entry>
-    <title>Hello World</title>
-    <link href="/2023/01/12/hello-world/"/>
-    <url>/2023/01/12/hello-world/</url>
-    
-    <content type="html"><![CDATA[<p>Welcome to <a href="https://hexo.io/">Hexo</a>! This is your very first post. Check <a href="https://hexo.io/docs/">documentation</a> for more info. If you get any problems when using Hexo, you can find the answer in <a href="https://hexo.io/docs/troubleshooting.html">troubleshooting</a> or you can ask me on <a href="https://github.com/hexojs/hexo/issues">GitHub</a>.</p><h2 id="Quick-Start"><a href="#Quick-Start" class="headerlink" title="Quick Start"></a>Quick Start</h2><h3 id="Create-a-new-post"><a href="#Create-a-new-post" class="headerlink" title="Create a new post"></a>Create a new post</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><code class="hljs bash">$ hexo new <span class="hljs-string">&quot;My New Post&quot;</span><br></code></pre></td></tr></table></figure><p>More info: <a href="https://hexo.io/docs/writing.html">Writing</a></p><h3 id="Run-server"><a href="#Run-server" class="headerlink" title="Run server"></a>Run server</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><code class="hljs bash">$ hexo server<br></code></pre></td></tr></table></figure><p>More info: <a href="https://hexo.io/docs/server.html">Server</a></p><h3 id="Generate-static-files"><a href="#Generate-static-files" class="headerlink" title="Generate static files"></a>Generate static files</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><code class="hljs bash">$ hexo generate<br></code></pre></td></tr></table></figure><p>More info: <a href="https://hexo.io/docs/generating.html">Generating</a></p><h3 id="Deploy-to-remote-sites"><a href="#Deploy-to-remote-sites" class="headerlink" title="Deploy to remote sites"></a>Deploy to remote sites</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><code class="hljs bash">$ hexo deploy<br></code></pre></td></tr></table></figure><p>More info: <a href="https://hexo.io/docs/one-command-deployment.html">Deployment</a></p>]]></content>
-    
-    
     
   </entry>
   
